@@ -1,0 +1,494 @@
+---
+title: "BDA - Project"
+author: "Anonymous"
+output: pdf_document
+---
+
+
+
+\textbf{Introduction}
+
+In this project, we explore linear regression under the different regularization constraint. The focus is on sparsity constraint and its implementation both in the context of frequentesi and Bayesian view. The regression problem is aimed to estimate the parameters $\beta \in R^{p}$ using 
+$$ Y \propto X\beta+\epsilon, $$
+
+where $X\in R^{n\times p}$ matrix is the observed $n$ data points with a dimension of size $p$, $\beta$ is a p-dimensional parameter vector of regression coefficients and $\epsilon$ is a standard normal variable. Sparsity constraint is interpreted such that only a few of these covariates have meaningful correlation with outcome. However, we do not have any prior information that which covariates are relevant and  which are irrelevant. Regularized (or penalized) regressions are the statistical techniques that have the ability to selects few variables of $\beta$ to predict the outcome instead of using all $\beta$'s \cite{friedman2001elements}. This will be achieved in bayesian setting via employing certain priors that induce sparsity on the final solution which is the main topic of this project.
+
+<<<Organization of the >>>
+## Data set
+
+Our course project concerns analyzing the data from the University of California, Irvine's Machine Learning Repository on 'Crimes and Communities Unnormalized'. This Dataset combines socio-economic data from the ’90 Census, law enforcement data from the 1990 Law Enforcement Management and Admin Stats survey, and crime data from the 1995 FBI UCR. The dataset contains a large amount of information collected from each community which can be summarized in the broad categories of race, age, employment, marital status, immigration data and home ownership. The per capita violent crimes variable is calculated using per community population. The UCI dataset gave us data on the numbers of different types of crimes (like murder, rape, burglary, etc.) committed annually within each community and the sum of crime variables considered violent crimes in the United States: murder, rape, robbery, and assault in each community. 
+
+Using of this dataset, our goal is to build a linear regression model that can identify the correlation between the crime rates and violent per population (ViolentCrimesPerPop) and various socio-economic factors of that community such as population, ethnicity, age, income, education, marital status, housing, etc.
+
+## Bayesian linear regression
+Bayesian linear regression assumes that the responses are sampled from a probability distribution such as normal distribution: 
+
+$$ y \sim \mathcal{N}(\beta^T X, \sigma^2) $$
+
+
+
+## Load the necessary libraries
+First of all we load the libraries that will be used: 
+
+```{r setup, include=FALSE}
+# This chunk just sets echo = TRUE as default (i.e. print all code)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyr) 
+library(rstan) 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+library(loo)
+library(ggplot2)
+library(gridExtra)
+library(bayesplot)
+theme_set(bayesplot::theme_default(base_family = "sans"))
+library(shinystan)
+source('stan_utility.R')
+library(aaltobda)
+SEED <- 48927 # set random seed for reproducability
+set.seed(SEED)
+library(grid)
+library(gridExtra)
+library(plotly)    # for 3D plotting
+
+util <- new.env()
+source('stan_utility.R', local=util)
+```
+
+## Reading the data
+Next we need to read in data from the link: 
+
+```{r}
+
+crimedata <-read.csv("http://archive.ics.uci.edu/ml/machine-learning-databases/00211/CommViolPredUnnormalizedData.txt",
+                            header = FALSE, sep = ",", quote = "\"", dec = ".", fill = TRUE, comment.char = "",
+                            na.strings="?",strip.white=TRUE,stringsAsFactors = default.stringsAsFactors())
+
+```
+
+The raw data consists of 147 attributes including 18 depending variables (potential outcomes) and 2215 observations. 
+
+## preprocessing
+
+The UCI dataset was filled with missing data, noted by ? marks. In order to clean the data, we first replaced all of the ? marks with NAs. There are 5 columns in the data set ... . Since the explanatory variable of our analysis was ViolentCrimesPerPop, we removed every row in the data set in which the ViolentCrimesPerPop value for that observation was NA. 
+```{r}
+
+# Unnecessary fields
+names(crimedata)[1] <- "communityname"
+names(crimedata)[2] <- "state"
+names(crimedata)[3] <- "countyCode"
+names(crimedata)[4] <- "communityCode"
+names(crimedata)[5] <- "fold"
+
+# Potential goals
+names(crimedata)[130] <- "murders"
+names(crimedata)[131] <- "murdPerPop"
+names(crimedata)[132] <- "rapes"
+names(crimedata)[133] <- "rapesPerPop"
+names(crimedata)[134] <- "robberies"
+names(crimedata)[135] <- "robbbPerPop"
+names(crimedata)[136] <- "assaults"
+names(crimedata)[137] <- "assaultPerPop"
+names(crimedata)[138] <- "burglaries"
+names(crimedata)[139] <- "burglPerPop"
+names(crimedata)[140] <- "larcenies"
+names(crimedata)[141] <- "larcPerPop"
+names(crimedata)[142] <- "autoTheft"
+names(crimedata)[143] <- "autoTheftPerPop"
+names(crimedata)[144] <- "arsons"
+names(crimedata)[145] <- "arsonsPerPop"
+names(crimedata)[146] <- "ViolentCrimesPerPop"
+names(crimedata)[147] <- "nonViolPerPop"
+
+possible_targets <- c("murders", "murdPerPop", "rapes", "rapesPerPop", "robberies", "robbbPerPop", 
+             "assaults",  "assaultPerPop", "burglaries", "burglPerPop", "larcenies", "larcPerPop",
+             "autoTheft", "autoTheftPerPop", "arsons", "arsonsPerPop", "nonViolPerPop")
+
+outcome <- c("ViolentCrimesPerPop")
+
+
+notneededFeatures <- c(possible_targets, "communityname", "state", 
+                       "countyCode", "communityCode", "fold")
+
+possible_predictors <- colnames(crimedata)[!(colnames(crimedata) %in% 
+                                                      notneededFeatures)]
+crimedata <- crimedata[, names(crimedata) %in% possible_predictors]
+out <- log(crimedata[outcome])
+
+crimedata[outcome] <- out
+inf_row_index <- which(grepl(-Inf, out[,1]))
+crimedata_No_inf <- crimedata[-c(inf_row_index),] 
+# 
+crimedatacleaned <- na.omit(crimedata)
+## TO DO : remove first those columns that have NA's
+# crimedata_No_NA_cols <- crimedata[, colSums(is.na(crimedata)) == 0]
+# crimedata_No_NA_rows <- cbind(crimedata_No_NA_cols, out)
+# inf_row_index <- which(grepl(-Inf, pred[,1]))
+# crimedata_No_NA_rows <- crimedata_No_NA_rows[-c(inf_row_index),] 
+#crimedatacleaned <- na.omit(crimedata_No_NA_rows)
+
+```
+
+
+## Split dataset intro train and test
+
+We need to split out the data into train and test sets. We train our model on 80\% of data and test it on 20\% of data. Next, since the dataset was unnormalized we normalized the data set and log transformed the output variable. 
+
+```{r}
+train_index <- sample(1:nrow(crimedatacleaned), 0.8 * nrow(crimedatacleaned))
+test_index <- setdiff(1:nrow(crimedatacleaned), train_index)
+
+y_crime <- crimedatacleaned[, names(crimedatacleaned) %in% outcome]
+y_crime_train <- y_crime[train_index]
+y_crime_test <- y_crime[test_index]
+
+X <- colnames(crimedatacleaned)[!(colnames(crimedatacleaned) %in% 
+                                          outcome)]
+X <-  crimedatacleaned[, names(crimedatacleaned) %in% X]
+X_crime <- data.matrix(X, rownames.force = NA)
+
+X_crime_train <- X_crime[train_index,]
+X_crime_test <- X_crime[test_index,]
+
+# Normalization
+X_train <- scale(X_crime_train)
+
+# Find means and SDs of training data variables
+# means2 <- attributes(X_train)$`scaled:center`
+# SDs2 <- attributes(X_train)$`scaled:scale`
+
+# Normalization: Scale test data using training data summary stats (no cheating!)
+X_test <- scale(X_crime_test) #, center = means2, scale = SDs2)
+
+
+#crimedataNormalized <- as.data.frame(lapply(crimedatacleaned, normalize))
+# X_train_z <- apply(X_crime_train, 2, normalize)
+# X_test_z <- apply(X_crime_test, 2, normalize)
+
+y_train <- (y_crime_train)
+y_test <- (y_crime_test)
+
+# write.csv(X_train,'X_train.csv')
+# write.csv(X_test,'X_test.csv')
+# write.csv(y_train,'y_train.csv')
+# write.csv(y_test,'y_test.csv')
+
+
+```
+
+## Visualize correlation of train data
+It would be useful to visualize the train data to get a sense of information about the data we are working with. We used correlation matrix to  show the correlation between covariates and outcome.
+
+```{r}
+# Plotting correlation matrix
+cor(crimedatacleaned) %>%
+as.data.frame() %>%
+mutate(Var1 = factor(row.names(.), levels=row.names(.))) %>% # For nice order
+gather(Var2, Correlation, 1:125) %>%
+ggplot(aes(reorder(Var2, Correlation), # Reorder to visualize
+           reorder(Var1, -Correlation), fill = Correlation)) +
+geom_tile() +
+scale_fill_continuous(type = "viridis") +
+xlab("Variable") +
+ylab("Variable") +
+theme_minimal(base_size = 5) +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r}
+# First, prepare data for Stan
+data_crime <- list(N_train = nrow(X_train),
+                 N_test  = nrow(X_test),
+                 N_pred  = ncol(X_train),
+                 y_train = y_train,
+                 X_train = X_train,
+                 X_test  = X_test)
+```
+
+
+## Traditional linear regression
+The goal in traditional linear regression is to mimimize the squared error between predicted and actual observations. Formally, we can represent this with a loss function of the following form:
+
+
+## Regularized regression
+Regularized linear regression models are aimed to have a more conservative estimation of weights ($\beta$'s) in the model. The central idea of penalized regression approaches is to add a penalty term to the minimization of the sum of squared residuals, with the goal of shrinking small coefficients towards zero while leaving large coefficients large. 
+
+
+The $\lambda$ parameter controls how much we learn from the data, with smaller and larger values leading to more and less learning, respectively. Therefore, $\lambda$ is called a hyperparameter. In the Bayesian world, we can capture such an effect in the form of a prior distribution over our $\beta$ weights. There are many ways to regularize the estimation procedures including ridge (), LASSO (Laplace), horeshoe and ... regression.
+
+Bayesian models view estimation as a problem of integrating prior information with information gained from data, which we formalize using probability distributions. Bayesian models require us to specify a prior distribution for each parameter we seek to estimate. Therefore, we need to specify a prior on the slopes ($\beta$), and error variance ($\sigma$). Our choice of prior distribution on $\beta$ is what determines how much information we learn from the data, analagous to the penalty term $\lambda$ used for frequentist regularization.
+
+
+If we assume that $\beta \sim U(-\infty, +\infty)$ and can take on any real-valued number, and every value is equally likely (uniform distributon), the mode of the posterior distribution on each $\beta$ weight will be equivalent to the maximum likelihood estimate of the respective $\beta$ weight. An unbounded uniform distribution on $\beta$ produces the same behavior as traditional linear regression and allows us to maximally learn from the data. However, we can use a prior distribution that pulls the $\beta$ weights toward 0 (unlike the unbounded uniform distribution). In the following we will check some of these priors. 
+
+## Ridge regression
+
+The normal distribution for prior on $\beta$ is mathematically equivalent in expectation (\cite{}) to using the ridge penalty in the frequentist model: 
+
+$$ \beta \sim \mathcal{N}(0, \sigma_\beta) $$ 
+
+The normal distribution places very little prior probability on large-magnitude $\beta$ weights (i.e. far from 0), while placing high prior probability on small-magnitude weights (i.e. near 0). On the other hand, $\sigma_\beta$ controls how wide the normal distribution is, thus controlling the specific amount of prior probability placed on small- to large-magnitude $\beta$ weights. Below is the Stan code that specifies the Bayesian variant of ridge regression \cite{}:
+
+```{r}
+writeLines(readLines("ridge.stan"))
+```
+
+A uniform prior on $\sigma_\beta$ denotes no penalty at all, and we are left with traditional, non-regularized regression. We can actually view Bayesian ridge regression as a simple hierarchical Bayesian model by jointly estimating $\sigma_\beta$ along with individual-level $\beta$ weights, where $\sigma_\beta$ is interpreted as a group-level scaling parameter that is estimated from pooled information across individual $\beta$ weights.
+ 
+```{r}
+writeLines(readLines("ridge_hierarchical.stan"))
+```
+
+Now, we fit the ridge regression model as follows: 
+
+```{r}
+bayes_ridge <- stan_model('ridge_hierarchical.stan')
+
+# Fit the model using Stan's NUTS HMC sampler
+fit_bayes_ridge <- sampling(bayes_ridge, data_crime, iter = 2000, 
+                            warmup = 500, chains = 4, cores = 4)
+
+# Extract posterior distribution (parameters and predictions)
+post_ridge <- rstan::extract(fit_bayes_ridge)
+
+# Compute mean of the posterior predictive distribution over test set predictors,
+# which integrates out uncertainty in parameter estimates
+y_pred_bayes_ridge <- apply(post_ridge$y_test, 2, mean)
+
+# Plot correlation between posterior predicted mean and actual Pr(Acceptance)
+qplot(x = y_pred_bayes_ridge, y = y_test,
+      main = paste0("Bayesian Ridge Regression:\nEstimating ", expression(lambda), 
+                    " Hierarchically\nMSE = ", round(mean((y_test - y_pred_bayes_ridge)^2),2))) + # round(cor(y_test, y_pred_bayes),2)
+  xlab("Model Predicted Pr(Acceptance)") +
+  ylab("Actual Pr(Acceptance)") +
+  theme_minimal(base_size = 20)
+#print(fit_bayes_ridge)
+
+capture.output(util$check_n_eff(fit_bayes_ridge))
+capture.output(util$check_rhat(fit_bayes_ridge))
+util$check_div(fit_bayes_ridge)
+util$check_treedepth(fit_bayes_ridge)
+util$check_energy(fit_bayes_ridge)
+```
+
+
+95% Bayesian credibility interval can simply be interpreted as the interval in which the true value lies with 95% probability (e.g., Berger, 2006). The following figure illustrates the scatterplot the prediction uncertanity that includes prediction intervals around the predicted mean estimates for each observation in the test set:
+
+```{r}
+# `bayesplot` has many convenience functions for working with posteriors
+color_scheme_set(scheme = "darkgray")
+ppc_intervals(x = colMeans(post_ridge$y_test), y = y_test,
+              yrep = post_ridge$y_test, prob = 0.95) +
+  ggtitle("95% Posterior Prediction Intervals") +
+  xlab("Model Predicted Pr(Acceptance)") +
+  ylab("Actual Pr(Acceptance)") +
+  theme_minimal(base_size = 20)
+```
+
+## LASSO regression
+
+LASSO regression only involves a minor revision to the loss function, as opposed to penalizing the model based on the sum of squared $\beta$ weights in ridge regresion, we will penalize the model by the sum of the absolute value of $\beta$ weights. Unlike for the ridge penalty, there are sharp corners in the geometry of LASSO penalty, which correspond to when some of $\beta$'s equal 0. 
+
+The LASSO is often more useful in situations where many of the predictors are noisy and we expect the solution to be more sparse and LASSO is effective by setting $\beta$ weights on noisy predictors to exactly 0. 
+
+Setting a Laplace (i.e. double-exponential) prior on the $\beta$ weights is mathematically equivalent in expectation to the frequentist LASSO penalty \cite{}: 
+
+$$ \beta \sim double-expoential(0, \tau_\beta) $$
+
+where in $\tau_\beta$ is a scale parameter that controls how peaked the prior distribution is around the center. For large amount of $\tau_\beta$ the prior reduces to a uniform prior and therefore noregularization (traditional regression). For small amount of $\tau_\beta$ the model assigns infinite weight on those $\beta$'s that are 0, therefore there is no learning from data.
+
+The stan code that specifies the Bayesian LASSO regression is shown in the below: 
+
+```{r}
+writeLines(readLines("lasso_hierarchical.stan"))
+```
+
+Now let's fit the model and visualize the results: 
+
+```{r}
+#fit_bayes_lasso <- stan(file="lasso.stan", data = data_crime, seed = SEED)
+bayes_lasso <- stan_model('lasso_hierarchical.stan')
+
+# Fit the model using Stan's NUTS HMC sampler
+fit_bayes_lasso <- sampling(bayes_lasso, data_crime, iter = 2000,
+                            warmup = 500, chains = 4, cores = 4)
+
+
+# Extract posterior distribution (parameters and predictions)
+post_lasso <- rstan::extract(fit_bayes_lasso)
+
+# Compute mean of the posterior predictive distribution over test set predictors,
+# which integrates out uncertainty in parameter estimates
+y_pred_bayes_lasso <- apply(post_lasso$y_test, 2, mean)
+
+# Plot correlation between posterior predicted mean and actual Pr(Acceptance)
+qplot(x = y_pred_bayes_lasso, y = y_test,
+      main = paste0("Bayesian LASSO Regression:\nMSE = ", round(mean((y_test - y_pred_bayes_lasso)^2),2))) + 
+    xlab("Model Predicted Pr(Acceptance)") +
+    ylab("Actual Pr(Acceptance)") +
+    theme_minimal(base_size = 20)
+
+#print(fit_bayes_lasso)
+
+capture.output(util$check_n_eff(fit_bayes_lasso))
+capture.output(util$check_rhat(fit_bayes_lasso))
+util$check_div(fit_bayes_lasso)
+util$check_treedepth(fit_bayes_lasso)
+util$check_energy(fit_bayes_lasso)
+```
+
+
+
+```{r}
+# `bayesplot` has many convenience functions for working with posteriors
+color_scheme_set(scheme = "darkgray")
+ppc_intervals(x = colMeans(post_lasso$y_test), y = y_test,
+              yrep = post_lasso$y_test, prob = 0.95) +
+  ggtitle("95% Posterior Prediction Intervals") +
+  xlab("Model Predicted Pr(Acceptance)") +
+  ylab("Actual Pr(Acceptance)") +
+  theme_minimal(base_size = 20)
+```
+
+
+## Horseshoe regression
+$$
+\begin{align*}
+\beta_{m} &\sim \mathcal{N} (0, \tau \cdot \lambda_{m})
+\\
+\lambda_{m} &\sim \mathcal{C}^{+} (0, 1)
+\\
+\tau &\sim \mathcal{C}^{+} (0, \tau_{0})
+\\
+Y &\sim \mathcal{N}(X\beta,\sigma^2I)
+\end{align*}
+$$
+- The “global” term $\tau$ should provide substantial shrinkage towards zero
+- The “local” $\lambda$ terms should have heavy tails so that “signals” are not shrunk too much.
+```{r}
+#fit_bayes_lasso <- stan(file="horseshoe_hierarchical.stan", data = data_crime, seed = SEED)
+bayes_horseshoe <- stan_model('horseshoe_hierarchical.stan')
+
+# Fit the model using Stan's NUTS HMC sampler
+fit_bayes_horseshoe <- sampling(bayes_horseshoe, data_crime, iter = 2000,
+                            warmup = 500, chains = 4, cores = 4)
+
+
+# Extract posterior distribution (parameters and predictions)
+post_horseshoe <- rstan::extract(fit_bayes_horseshoe)
+
+# Compute mean of the posterior predictive distribution over test set predictors,
+# which integrates out uncertainty in parameter estimates
+y_pred_bayes_horseshoe <- apply(post_horseshoe$y_test, 2, mean)
+
+# Plot correlation between posterior predicted mean and actual Pr(Acceptance)
+qplot(x = y_pred_bayes_horseshoe, y = y_test,
+      main = paste0("Bayesian Horseshoe Regression:\nMSE = ", round(mean((y_test - y_pred_bayes_horseshoe)^2),2))) +
+    xlab("Model Predicted Pr(Acceptance)") +
+    ylab("Actual Pr(Acceptance)") +
+    theme_minimal(base_size = 20)
+
+#print(fit_bayes_horseshoe)
+
+# capture.output(util$check_n_eff(fit_bayes_horseshoe))
+# capture.output(util$check_rhat(fit_bayes_horseshoe))
+# util$check_div(fit_bayes_horseshoe)
+# util$check_treedepth(fit_bayes_horseshoe)
+# util$check_energy(fit_bayes_horseshoe)
+
+util$check_all_diagnostics(fit_bayes_horseshoe)
+
+```
+
+
+
+```{r}
+# `bayesplot` has many convenience functions for working with posteriors
+color_scheme_set(scheme = "darkgray")
+ppc_intervals(x = colMeans(post_horseshoe$y_test), y = y_test,
+              yrep = post_horseshoe$y_test, prob = 0.95) +
+  ggtitle("95% Posterior Prediction Intervals") +
+  xlab("Model Predicted Pr(Acceptance)") +
+  ylab("Actual Pr(Acceptance)") +
+  theme_minimal(base_size = 20)
+```
+
+
+## comparison
+
+```{r} 
+log_lik_ridge <- extract_log_lik(fit_bayes_ridge, merge_chains = FALSE)
+r_eff_ridge <- relative_eff(exp(log_lik_ridge)) 
+loo_ridge <- loo(log_lik_ridge, r_eff = r_eff_ridge)
+print(loo_ridge)
+plot(loo_ridge, diagnostic = c("k", "n_eff"),
+  label_points = FALSE, main = "PSIS diagnostic plot: ridge model")
+```
+
+
+```{r} 
+log_lik_lasso <- extract_log_lik(fit_bayes_lasso, merge_chains = FALSE)
+r_eff_lasso <- relative_eff(exp(log_lik_lasso)) 
+loo_lasso <- loo(log_lik_lasso, r_eff = r_eff_lasso)
+print(loo_lasso)
+plot(loo_lasso, diagnostic = c("k", "n_eff"),
+  label_points = FALSE, main = "PSIS diagnostic plot: lasso model")
+```
+
+```{r} 
+log_lik_horseshoe <- extract_log_lik(fit_bayes_horseshoe, merge_chains = FALSE)
+r_eff_horseshoe <- relative_eff(exp(log_lik_horseshoe)) 
+loo_horseshoe <- loo(log_lik_horseshoe, r_eff = r_eff_horseshoe)
+print(loo_horseshoe)
+plot(loo_horseshoe, diagnostic = c("k", "n_eff"),
+  label_points = FALSE, main = "PSIS diagnostic plot: horseshoe model")
+```
+```{r} 
+compare_ridge_lasso <- compare(loo_ridge, loo_lasso)
+print(compare_ridge_lasso)
+
+compare_ridge_horseshoe <- compare(loo_ridge, loo_horseshoe)
+print(compare_ridge_horseshoe)
+
+compare_lasso_horseshoe <- compare(loo_lasso, loo_horseshoe)
+print(compare_lasso_horseshoe)
+```
+## Conclusion
+
+In this project, data from the USA Communities and Crime Data Set, sourced from the UCI Dataset Repository, was used with different shrinkage priors to predict the level of Violent Crime in USA Communities.
+
+There are several differences between Bayesian approaches to shrinkage and penalized ML approaches.
+
+The point estimates:
+
+    ML: mode
+    Bayesian: posterior mean (or median)
+
+In Lasso
+
+    ML: the mode produces exact zeros and sparsity
+    Bayesian: posterior mean is not sparse (zero)
+
+Choosing the shrinkage penalty:
+
+    ML: cross-validation
+    Bayesian: a prior is placed on the shrinkage penalty, and it is estimated as part of the posterior.
+
+```{r}
+fit <- cv.glmnet(X_train,y_train,alpha=0)
+lambdas <- 10^seq(3, -2, by = -.1)
+fit <- cv.glmnet(X_train,y_train,alpha=0,lambda = lambdas)
+
+plot(fit)
+opt_lambda <- fit$lambda.min
+y_predicted <- predict(fit, s = opt_lambda, newx = X_test)
+sse <- sum((y_predicted - y_test)^2)
+sse
+qplot(x = y_predicted, y = y_test)
+
+```

@@ -1,0 +1,94 @@
+---
+title: "BDA - Assignment 6"
+author: "Anonymous"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# This chunk just sets echo = TRUE as default (i.e. print all code)
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+
+library(tidyr) 
+library(rstan) 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+library(loo)
+library(ggplot2)
+library(gridExtra)
+library(bayesplot)
+theme_set(bayesplot::theme_default(base_family = "sans"))
+library(shinystan)
+source('stan_utility.R')
+library(aaltobda)
+SEED <- 48927 # set random seed for reproducability
+```
+
+\textbf{Problem 1: }
+
+The following lines will read the data. Data is summarized into a vectors of the number of animals and the number of deaths in each experiment.
+```{r}
+
+data("bioassay")
+x = bioassay$x
+y = bioassay$y 
+n = bioassay$n
+k = length(n)
+
+mu_alpha <- 0
+s_alpha <- 2
+mu_beta <- 10
+s_beta <- 10
+rho <- 0.5
+sigma <-  matrix(c(s_alpha^2, rho*s_alpha*s_beta, rho*s_alpha*s_beta, s_beta^2 ), ncol=2)
+mu = c(mu_alpha, mu_beta)
+
+d_bin <- list(k = k,
+              n = n,
+              x = x,
+              y = y, 
+              sigma_0 = sigma, 
+              mu_0 = mu)
+```
+
+The model for the bioassay data in Stan syntax can be read from the Assignment6.stan file which is as follows: 
+
+```{r}
+writeLines(readLines("Assignment6.stan"))
+```
+Then, in order to fit the model on the data, we use the following command: 
+```{r}
+fit <- stan(file="Assignment6.stan", data = d_bin, seed = SEED)
+```
+\textbf{Problem 2: Estimarion of $\hat{R}$ } 
+
+For the $\hat{R}$ convergance analysis, I am using function $\hat{R}$ from package rstan. In the following analysis, theta[1] is $\alpha$ and theta[2] is $\beta$. 
+
+```{r}
+monitor(fit, probs = c(0.1, 0.5, 0.9))
+print(fit)
+```
+
+$\hat{R}$ compares the whithin and between variances of the chains. The within variance tells how much each chain has explored and on the other hand between variance is the total variance when we combine all chains. If we run long enough, the average of within variances and total variance will be close together and the $\hat{R}$ would be close to 1.
+
+As it can be seen in the above analysis the $\hat{R}$ for both $\alpha$ and $\beta$ is 1, therefore,  the chains have probably converged and estimates are reliable. 
+```{r}
+draws <- as.data.frame(fit)
+mcmc_hist(draws, pars = 'theta[1]')
+mcmc_hist(draws, pars = 'theta[2]')
+```
+
+
+\textbf{Problem 3: Scatter plot of $\alpha$ and $\beta$ }
+
+In the following figure you can see the scatter plot of draws of $\alpha$ and $\beta$ for draws implemented above. 
+```{r}
+xl <- c(-5, 10)
+yl <- c(-10, 40)
+
+ggplot(data = data.frame(draws$`theta[1]`, draws$`theta[2]`)) +
+  geom_point(aes(draws$`theta[1]`, draws$`theta[2]`), color = 'blue', size = 0.3) +
+  coord_cartesian(xlim = xl, ylim = yl) +
+  labs(x = 'alpha', y = 'beta')
+```

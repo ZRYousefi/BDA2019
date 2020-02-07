@@ -1,0 +1,247 @@
+---
+title: "BDA - Assignment 7"
+author: "Anonymous"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# This chunk just sets echo = TRUE as default (i.e. print all code)
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+
+library(tidyr) 
+library(rstan) 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+library(loo)
+library(ggplot2)
+library(gridExtra)
+library(bayesplot)
+theme_set(bayesplot::theme_default(base_family = "sans"))
+library(shinystan)
+source('stan_utility.R')
+library(aaltobda)
+SEED <- 48927 # set random seed for reproducability
+```
+
+\textbf{Problem 1: Linear model: drowning data with Stan}
+
+## Fixing errors
+
+The first crucial mistake is in line 10: 
+```{r eval=FALSE}
+real<upper=0> sigma;
+```
+The variance cannot be negative, therefor this line should be:
+```{r eval=FALSE}
+real<lower=0> sigma;
+```
+Anoher mistake is in generated quantities. mu is a vector parameter, therefore defining ypred as a real value will make a syntax error. 
+```{r eval=FALSE}
+generated quantities {
+  real ypred;
+  ypred = normal_rng(mu , sigma);
+}
+```
+
+The correct lines are as follows: 
+```{r eval=FALSE}
+generated quantities {
+  real ypred;
+  ypred = normal_rng(alpha + beta*xpred , sigma);
+}
+```
+
+## Determination of $\tau$
+
+The following lines will read the data. Data is summarized into a vectors of the years and the number of drownings in each year.
+```{r}
+data("drowning")
+d_lin <- list(N = nrow(drowning),
+              x = drowning$year,
+              y = drowning$drownings ,
+              xpred = 2019)
+
+ggplot() +
+  geom_point(aes(x, y), data = data.frame(d_lin), size = 1) +
+  labs(y = 'number of drowned', x= "Year") +
+  guides(linetype = F)
+  
+```
+
+To analyse whether the number of drowned people is rising, we use a linear model with Gaussian model for the unexplained variation.
+The linear regression model for the drowningn data in Stan syntax can be read from the Assignment7a.stan file which is as follows: 
+
+```{r}
+writeLines(readLines("Assignment7a1.stan"))
+
+fit_lin <- stan(file="Assignment7a1.stan", data = d_lin, seed = SEED,control = list(max_treedepth =15))
+
+```
+
+We would like to apply a weakly informative prior $\beta \sim \mathcal{N}(0,\tau^2)$ for $\beta$, s.t. $p(-69<\beta<69) = 0.99$. Due to the symmetry of the normal distribution, this is equivalent to $p(\beta\le-69) = 0.005$. From this we get that:
+
+$$p(\beta\le-69) = p(\tau Z\le-69) = p(Z \le -69/\tau) = 0.005$$
+where $Z \sim \mathcal{N}(0,1)$. This is true when
+$$ \tau = -\frac{69}{F^{-1}(0.005)} $$
+where $F^{-1}(p)$ is the inverse CDF (quantile function) of $Z \sim \mathcal{N}(0,1)$. 
+It can be calculated as :
+```{r}
+tau <- -69 / qnorm(0.005) 
+tau
+```
+
+
+## Implementation of the prior
+
+In order to include the prior into the model we add the line $beta \sim normal(0, tau);$ into the model{} block and "real tau;" in data{} block.  
+
+Create another list with data and prior: 
+```{r}
+d_lin_prior <- c(list(
+    tau = 26.7),
+  d_lin)
+```
+
+Then, in order to fit the model on the data, we use the following command: 
+
+
+```{r}
+writeLines(readLines("Assignment7a2.stan"))
+
+fit_lin <- stan(file="Assignment7a2.stan", data = d_lin_prior, seed = SEED,control = list(max_treedepth =15))
+
+```
+
+
+```{r}
+monitor(fit_lin, probs = c(0.1, 0.5, 0.9))
+print(fit_lin)
+
+check_hmc_diagnostics(fit_lin)
+
+samples_lin <- rstan::extract(fit_lin, permuted = T)
+# mean(samples_lin$beta>0) # probability that beta > 0
+
+mu <- apply(samples_lin$mu, 2, quantile, c(0.05, 0.5, 0.95)) %>%
+  t() %>% data.frame(x = d_lin$x, .)  %>% gather(pct, y, -x)
+
+pfit <- ggplot() +
+  geom_point(aes(x, y), data = data.frame(d_lin), size = 1) +
+  geom_line(aes(x, y, linetype = pct), data = mu, color = 'red') +
+  scale_linetype_manual(values = c(2,1,2)) +
+  labs(y = 'number of drowned', x= "Year") +
+  guides(linetype = F)
+pars <- intersect(names(samples_lin), c('beta','ypred'))
+draws <- as.data.frame(fit_lin)
+phist <- mcmc_hist(draws, pars = pars)
+grid.arrange(pfit, phist, nrow = 2)
+
+```
+
+As it can be seen the histagrams for posterior beta and posterior predictive for year 2019 match the plots provided in the exercise.
+
+\textbf{Problem 2: Hierarchical model: factory data with Stan } 
+
+## Seperated Gaussian Model
+
+First we consider the separated model. For this model, each machine j is assumed to have unrelated means $\mu_j$
+and $\sigma_j$ and the posterior distribution is determined as follows:  $y_j \sim \mathcal{N}(\mu_j, \sigma^2)$.  The Stan implementation is as follows:
+  
+```{r}
+data("factory")
+writeLines(readLines("Assignment7b_separat.stan"))
+```
+The data related to this model is : 
+```{r}
+data_separate <-list(N = 6*nrow(factory),
+                     K = 6,
+                     x = rep(1:6, nrow(factory)),
+                     y = c(t(factory)))
+```
+We fit the separate model in stan as follow: 
+```{r}  
+fit_sep <- stan(file="Assignment7b_separat.stan", data = data_separate, seed = SEED)
+```
+
+## i) The posterior of the mean of the sixth machine:
+$$ p(\mu_6|\sigma_6,y_6) \propto \mathcal{N}(\mu_6, \sigma_6^2)$$
+```{r}
+draws_separate <- as.data.frame(fit_sep)
+mcmc_hist(draws_separate, pars = c("mu[6]", "ypred"))
+```
+
+## ii) The predictive distribution for another quality measurement from the sixth machine: 
+$$ p(\hat{y_6}|\mu,\sigma) \propto  \mathcal{N}(\mu_6, \sigma_6^2) $$
+
+## iii) The posterior distribution of the mean of the quality measurements of the seventh machine:
+Since the machine is completely separate from the others, we cannot infer anything about the model from the posteriors of the other machines.
+Therefore the best prediction for $\mu_7$ is the prior, which is in this case poorly defined, since we are using the uninformative uniform priors.
+
+
+
+## Pooled model
+
+For the pooled model we assume that $\mu$ and $\sigma$ are the same for all machines. The Stan implementation for pooled model is as:
+  
+```{r}
+writeLines(readLines("Assignment7b_pooled.stan"))
+```
+The data related to this model is : 
+```{r}
+data_pooled <- list(N = 6*nrow(factory),
+                    y = c(t(factory)))
+```
+
+We fit the pooled model in stan as follows: 
+```{r}  
+fit_pooled <- stan(file = "Assignment7b_pooled.stan", data = data_pooled, seed = SEED)
+```
+
+
+## i) The posterior of the mean of the sixth machine:
+$$ p(\mu_6|\sigma, y) \propto \mathcal{N}(\mu, \sigma^2) $$
+
+## ii) The predictive distribution for another quality measurement from the sixth machine: 
+
+$$ p(\hat{y_6}|\mu,\sigma) \propto  \mathcal{N}(\mu, \sigma^2) $$
+
+## iii) The posterior distribution of the mean of the quality measurements of the seventh machine:
+Since the machines are assumed to be identical, the posterior distribution of the mean of the seventh machine is given as: 
+$$ p(\mu_7|\mu, \sigma) \propto \mathcal{N}(\mu, \sigma^2)$$
+```{r}
+draws_pooled <- as.data.frame(fit_pooled)
+mcmc_hist(draws_pooled, pars = c("mu", "ypred", "mu_7"))
+```
+
+Compared to the previous model, the poserior distribution is less narrow and smaller compard to the seperated gaussian model. The reason for this is that the standard deviation is larger in this model.
+The posterior distribution of the mean of the quality measurements of the seventh machine corresponds to the answer of the question i) for the pooled model.
+
+
+## Hierarchical model 
+
+In this model the means of the different machines are assumed to have a common standard deviation $\sigma$ and means $\mu$ that are drawn from a normal distribution with $\mu_0$ and $\sigma_0$. The Stan implementation of the model is as follows:
+
+
+```{r}
+writeLines(readLines("Assignment7b_hierarchical.stan"))
+```
+
+We fit the separate model in stan as follow: 
+```{r}  
+fit_hierarchical <- stan(file="Assignment7b_hierarchical.stan", data = data_separate, seed = SEED)
+```
+
+## The predictive distribution for another quality measurement from the sixth machine: 
+
+$$ p(\hat{y_6}|\mu,\sigma) \propto  \mathcal{N}(\mu_6, \sigma_6^2) $$
+
+```{r} 
+draws_hierarchical <- as.data.frame(fit_hierarchical)
+mcmc_hist(draws_hierarchical, c("mu[6]", "ypred", "mu_7"))
+
+```

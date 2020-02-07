@@ -1,0 +1,126 @@
+---
+title: "BDA - Assignment 9"
+author: "Anonymous"
+output: 
+  pdf_document: 
+    toc: yes
+    toc_depth: 1
+---
+
+
+
+```{r setup, include=FALSE}
+# This chunk just sets echo = TRUE as default (i.e. print all code)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(aaltobda)
+library(rstan)
+library(StanHeaders)
+library(ggplot2)
+data("factory")
+```
+let's reshape the data. We convert the data to a list and then consider another intiger list (with the same size) which indicates the factory number of each data. 
+```{r}
+data_vector= c()
+k=1
+index = c()
+for(i in 1:6){
+  for(j in 1:5){
+    data_vector[k]=factory[j,i]
+    index[k]= i
+    k = k+1
+  }
+}
+```
+In the hierarchical model, we specify in the data that the data are generated from different factories. However, we add the number of machines by 1 to also compute the posterior predictive for the 7th machine (even though we have no observations from the 7th factory)
+
+```{r}
+factory_model <- stan_model('EX9stan.stan')
+data_hier <- list(N = length(data_vector),
+                 K = max(index)+1, #add +1 so that the posterior predictive for the 7th would also be
+                 x = index,
+                 y = data_vector
+                 
+)
+fit_simple_h <- sampling(factory_model, data = data_hier,
+                       # these are the defaults but specifying them anyway
+                       # so you can see how to use them: 
+                       # posterior sample size = chains * (iter-warmup)
+                       chains = 4, iter = 2000, warmup = 1000,refresh=0)
+print(fit_simple_h)
+```
+
+The above samples are from posterior predictive distribution of the first 6 machines (ypred[1],...,ypred[6],ypred[7]).
+
+Now let's investigate the utility function:
+
+- each machine cost is 106 e
+- if quality above 85, then the customers pay 200 e, otherwise the prouct is not sold.
+
+
+The following function computes the average utility of a product of a machine given measurements:
+```{r}
+#This function receives the predictied data and computes its utility
+Utility <- function(draws = y_pred) {
+  total_profit = 0
+  for(i in 1:length(draws)){
+    #remove the cost of building from the profit
+    total_profit = total_profit - 106
+    #add the profit if quality is higher than a threshold
+    if(draws[i] > 85)
+      total_profit = total_profit + 200
+  }
+  #divide the total profit to the number of items
+  return(total_profit/length(draws)) 
+}
+
+#TEST:
+y_pred <- c(123.80, 85.23, 70.16, 80.57, 84.91)
+print('expected utility of the test example')
+print(Utility(y_pred))
+```
+
+# Question 1: For each of the six machines, compute and report the expected utility of one product of that machine.
+
+
+for this we use the posterior predictive data from each machine and compute the utility:
+
+```{r}
+sample_hie <- rstan::extract(fit_simple_h)
+
+# for each machine compute the expected utility
+utility = c()
+for(i in 1:6){
+  print(sprintf('Expected utility for machine %d:',i))
+  utility[i] = Utility(sample_hie$ypred[,i])
+  print(utility[i])
+}
+
+```
+# Question 2: Rank the machines based on the expected utilities.
+
+```{r}
+# print the order of indices from smallest to biggest 
+order(utility)
+```
+Given the order above and also the printed utilities, it seems that the first machine is the worst one as it has the expected utility of -20.95 e. This is quite bad as it indicates that not only there is no profit from this (on average) but also we need to pay more than what we earn from selling. This is probably because many measurements for this machine is bellow 85 and therefore, we cannot sell the product.
+
+For all other machines, the average profit is above zero, meaning that we will earn more than the cost (on average of course), i.e., on average profitable. Out of these, the best one is machine number 4 which gives us an average 71.8 e profit, which is quite good. This also means that on average many of the qualities for this machine are above 85 so that are able to sell many of these. Of course, we cannot sell all products from this machine since the expected utility is still bellow 94 (which is 200-106 indicating the maximum profit).
+
+
+# Question 3: Compute and report the expected utility of the products of a new (7th) machine.
+
+For the 7th machine we need to use the posterior predictive of the new machine computed in the Stan code:
+```{r}
+print('Expected utility for machine 7:')
+utility_7 = Utility(sample_hie$ypred[,7])
+print(utility_7)
+```
+
+The expected utility for machine 7 is also above zero.
+
+# Question 4:Based on your analysis, discuss briefly whether the company owner should buy a new (7th) machine.
+
+As the expected utility is above 0, it would be profitable on average to buy a new machine. However, this is not the best machine as machine number 4 which gave us an average 71.8 e. 
